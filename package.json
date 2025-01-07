@@ -1,0 +1,22 @@
+{
+  "name": "echo-room-service",
+  "version": "1.0.0",
+  "description": "Backend service for the Echo Room app It manages the room creating, room joining and database comunication",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/davidnan/echo-room-service.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/davidnan/echo-room-service/issues"
+  },
+  "homepage": "https://github.com/davidnan/echo-room-service#readme",
+  "dependencies": {
+    "express": "^5.0.0-beta.2"
+  }
+}
