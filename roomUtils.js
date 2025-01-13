@@ -1,5 +1,5 @@
 const { getUserAuthenticationInfo, isAuthenticated, admin, setUserAuthenticationRequest}= require("./checkAuth");
-const { Room, User} = require("./mongoUtils");
+const { Room, User, Song} = require("./mongoUtils");
 
 function codeGenerator() {
     return 'xyxxx-xyxyx'.replace(/[xy]/g, function(c) {
@@ -72,9 +72,33 @@ function getUidFromURL(url) {
     return url.match(VID_REGEX)[1]
 }
 
+async function getSongTitle(songUid) {
+    console.log(process.env.YOUTUBE_API_KEY)
+    const apiUrl = `https://www.googleapis.com/youtube/v3/videos?id=${songUid}&key=${process.env.YOUTUBE_API_KEY}&part=snippet`
+    const response = await fetch(apiUrl);
+    const data = await response.json();
+    return data.items[0].snippet.title
+}
+
 async function addSong(ws, dataJson) {
     const songUid = getUidFromURL(dataJson.url);
-    console.log(songUid);
+    const room = await Room.findOne({code: ws.user.roomCode})
+    const song = new Song({
+        title: await getSongTitle(songUid),
+        uid: songUid,
+    })
+    room.songs.push(song);
+    await room.save()
+    const songsJson = {
+        type: "songs",
+        songs: room.songs
+    }
+    console.log(songsJson)
+    ws.server.clients.forEach(client => {
+        if (client.user.roomCode === ws.user.roomCode) {
+            client.send(JSON.stringify(songsJson))
+        }
+    })
 }
 
 async function openConnectionToRoom(ws, dataJson) {
@@ -92,6 +116,29 @@ async function openConnectionToRoom(ws, dataJson) {
         const userDbObj = createUserFromAuth(userData, isOwner);
         room.users.push(userDbObj)
         await room.save()
+
+        const usersJson = {
+            type: "users",
+            users: room.users
+        }
+        console.log("Users:" + JSON.stringify(usersJson))
+
+        ws.server.clients.forEach(client => {
+            if (client.user.roomCode === ws.user.roomCode) {
+                client.send(JSON.stringify(usersJson))
+            }
+        })
+
+        const songsJson = {
+            type: "songs",
+            songs: room.songs
+        }
+        console.log(songsJson)
+        ws.server.clients.forEach(client => {
+            if (client.user.roomCode === ws.user.roomCode) {
+                client.send(JSON.stringify(songsJson))
+            }
+        })
     }
     catch (e) {
         ws.close()
@@ -131,6 +178,32 @@ async function closeConnectionToRoom(ws) {
     console.log("user: " + ws.user.uuid + " disconnected from: " + ws.user.roomCode);
 }
 
+async function getNextSong(ws) {
+    const room = await Room.findOne({code: ws.user.roomCode})
+    const nextSong = room.songs.pop()
+    console.log("nextSong: " + nextSong)
+    await room.save()
+    let data = {
+        type: "next_song",
+    }
+    if (nextSong) {
+       data.songUid = nextSong.uid
+    }
+    ws.send(JSON.stringify(data))
+
+    const songsJson = {
+        type: "songs",
+        songs: room.songs
+    }
+
+    ws.server.clients.forEach(client => {
+        if (client.user.roomCode === ws.user.roomCode) {
+            client.send(JSON.stringify(songsJson))
+        }
+    })
+
+}
+
 async function handleMessagesOnWs(ws, data) {
     let jsonData = undefined
     try{
@@ -151,6 +224,10 @@ async function handleMessagesOnWs(ws, data) {
             console.log(jsonData);
             await addSong(ws, jsonData);
             break;
+        case 'get_next_song':
+            await getNextSong(ws);
+            break;
+
 
     }
 }
