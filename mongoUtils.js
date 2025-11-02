@@ -8,7 +8,7 @@ const userSchema = new Schema({
   name: { type: String, required: true },
   email: { type: String, required: true },
   uid: { type: String, required: true },
-  isOwner: { type: Boolean, default: false },
+  permissions: { type: Number, default: 0 }, // bitmask for user permissions
 })
 
 
@@ -19,6 +19,7 @@ const songSchema = new Schema({
 
 const roomSchema = new Schema({
   owner: { type: userSchema, required: true }, // Owner of the room (string)
+  roomName: { type: String, required: true }, // Name of the room (string)
   code: { type: String, required: true }, // Room code (string)
   users: {
     type: [userSchema],

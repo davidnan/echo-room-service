@@ -12,9 +12,8 @@ async function getUserAuthenticationInfo(accessToken) {
 
 async function setUserAuthenticationRequest(req, res) {
   try{
-    console.log(req.body)
     if (!req.body) {
-      res.status(404).send('Room not found');
+      res.status(401).send('Invalid Credentials');
     }
     return await getUserAuthenticationInfo(req.body.accessToken)
   } catch (e) {

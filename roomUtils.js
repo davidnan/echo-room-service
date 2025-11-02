@@ -8,23 +8,29 @@ function codeGenerator() {
     });
 }
 
-function createUserFromAuth(userInfo, isOwner=false) {
+async function createUserFromAuth(userInfo, permissions=0) {
+    const userProfile = await User.findOne({uid: userInfo.uid});
+    console.log(userInfo)
+    if (userProfile) {
+        userInfo.name = userProfile.name;
+    }
     return new User({
         name: userInfo.name,
         email: userInfo.email,
         uid: userInfo.uid,
-        isOwner: isOwner
+        permissions: permissions
     })
 }
 
 async function saveRoom(userInfo) {
-    const owner = createUserFromAuth(userInfo, true);
+    const owner = await createUserFromAuth(userInfo, 1);
     const room = new Room({
         owner: owner,
         code: codeGenerator(),
         users: [],
         authorizedUsers: [userInfo.uid],
-        songs: []
+        songs: [],
+        roomName: owner.name + "'s Room",
     })
     await room.save()
     return room.code
@@ -32,6 +38,9 @@ async function saveRoom(userInfo) {
 
 async function createRoom(req, res) {
     const loginInformation = await setUserAuthenticationRequest(req, res);
+    if (loginInformation === null) {
+        res.status(301).send("Not authorized");
+    }
     const roomCode = await saveRoom(loginInformation);
     res.status(200).send(roomCode);
 }
@@ -73,11 +82,16 @@ function getUidFromURL(url) {
 }
 
 async function getSongTitle(songUid) {
-    console.log(process.env.YOUTUBE_API_KEY)
     const apiUrl = `https://www.googleapis.com/youtube/v3/videos?id=${songUid}&key=${process.env.YOUTUBE_API_KEY}&part=snippet`
     const response = await fetch(apiUrl);
     const data = await response.json();
-    return data.items[0].snippet.title
+
+    try {
+        return data.items[0].snippet.title
+    }
+    catch (e) {
+        return "Unknown title"
+    }
 }
 
 async function addSong(ws, dataJson) {
@@ -101,6 +115,62 @@ async function addSong(ws, dataJson) {
     })
 }
 
+async function changeSongOrder(ws, dataJson) {
+    const room = await Room.findOne({code: ws.user.roomCode})
+    const user = room.users.find(u => u.uid === ws.user.uuid)
+    if (user === null || !(user.permissions & 1)) {
+        return
+    }
+    room.songs = dataJson.songs
+
+    await room.save()
+    await sendQueueSongs(ws, room)
+}
+
+async function changeRoomName(ws, dataJson) {
+    const room = await Room.findOne({code: ws.user.roomCode})
+    const user = room.users.find(u => u.uid === ws.user.uuid)
+    if (user === null || !(user.permissions & 1)) {
+        return
+    }
+    room.roomName = dataJson.roomName
+    await room.save()
+    await sendRoomName(ws, room)
+}
+
+async function removeSong(ws, dataJson) {
+    const room = await Room.findOne({code: ws.user.roomCode})
+    const user = room.users.find(u => u.uid === ws.user.uuid)
+    if (user === null || !(user.permissions & 1)) {
+        return
+    }
+    const songIndex = room.songs.findIndex(s => s.uid === dataJson.songUid)
+    if (songIndex === -1) {
+        return
+    }
+    room.songs.splice(songIndex, 1)
+    await room.save()
+    await sendQueueSongs(ws, room)
+}
+
+async function kickUser(ws, dataJson) {
+    const roomDb = await Room.findOne({code: ws.user.roomCode})
+    const user = roomDb.users.find(u => u.uid === ws.user.uuid)
+    if (user === null || !(user.permissions & 1)) {
+        return
+    }
+
+    ws.server.clients.forEach(client => {
+        console.log(JSON.stringify(client.user))
+        if (client.user.roomCode === ws.user.roomCode && client.user.uuid === dataJson.userUuid) {
+            client.close();
+        }
+    })
+    await deleteUser(roomDb, dataJson.userUid)
+
+    await sendConnectedUsers(ws, roomDb)
+}
+
 async function openConnectionToRoom(ws, dataJson) {
     try{
         const userData = await getUserAuthenticationInfo(dataJson.accessToken)
@@ -112,33 +182,14 @@ async function openConnectionToRoom(ws, dataJson) {
         if (!room.authorizedUsers.includes(userData.uid)) {
             ws.close()
         }
-        const isOwner = room.owner.uid === userData.uid;
-        const userDbObj = createUserFromAuth(userData, isOwner);
+        const permissions = room.owner.uid === userData.uid ? 1 : 0;
+        const userDbObj = await createUserFromAuth(userData, permissions);
         room.users.push(userDbObj)
         await room.save()
 
-        const usersJson = {
-            type: "users",
-            users: room.users
-        }
-        console.log("Users:" + JSON.stringify(usersJson))
-
-        ws.server.clients.forEach(client => {
-            if (client.user.roomCode === ws.user.roomCode) {
-                client.send(JSON.stringify(usersJson))
-            }
-        })
-
-        const songsJson = {
-            type: "songs",
-            songs: room.songs
-        }
-        console.log(songsJson)
-        ws.server.clients.forEach(client => {
-            if (client.user.roomCode === ws.user.roomCode) {
-                client.send(JSON.stringify(songsJson))
-            }
-        })
+        await sendConnectedUsers(ws, room)
+        await sendQueueSongs(ws, room)
+        await sendRoomName(ws, room)
     }
     catch (e) {
         ws.close()
@@ -158,11 +209,55 @@ async function deleteUser(room, uuid) {
     await room.save()
 }
 
+async function sendConnectedUsers(ws, room) {
+    const usersJson = {
+        type: "users",
+        users: room.users
+    }
+    console.log("Users:" + JSON.stringify(usersJson))
+
+    ws.server.clients.forEach(client => {
+        if (client.user.roomCode === ws.user.roomCode) {
+            client.send(JSON.stringify(usersJson))
+        }
+    })
+}
+
+async function sendQueueSongs(ws, room) {
+
+    const songsJson = {
+        type: "songs",
+        songs: room.songs
+    }
+    console.log(songsJson)
+    ws.server.clients.forEach(client => {
+        if (client.user.roomCode === ws.user.roomCode) {
+            client.send(JSON.stringify(songsJson))
+        }
+    })
+}
+
+async function sendRoomName(ws, room) {
+    const roomNameJson = {
+        type: "roomName",
+        roomName: room.roomName
+    }
+    console.log("seending room anem:" + roomNameJson)
+    ws.server.clients.forEach(client => {
+        if (client.user.roomCode === ws.user.roomCode) {
+            client.send(JSON.stringify(roomNameJson))
+        }
+    })
+}
+
 async function closeConnectionToRoom(ws) {
     const room = await Room.findOne({code: ws.user.roomCode})
     try{
         const user = room.users.find(u => u.uid === ws.user.uuid)
-        if (user !== null && user.isOwner) {
+        if (user === null) {
+            return;
+        }
+        if (user.permissions & 1) {
             ws.server.clients.forEach(client => {
                 if (client.user.roomCode === ws.user.roomCode) {
                     client.close();
@@ -170,6 +265,10 @@ async function closeConnectionToRoom(ws) {
             })
             await deleteUser(room, ws.user.uuid)
             await deleteRoom(ws.user.roomCode)
+        }
+        else {
+            await deleteUser(room, ws.user.uuid)
+            await sendConnectedUsers(ws, room)
         }
     }
     catch (e) {
@@ -180,6 +279,10 @@ async function closeConnectionToRoom(ws) {
 
 async function getNextSong(ws) {
     const room = await Room.findOne({code: ws.user.roomCode})
+    const user = room.users.find(u => u.uid === ws.user.uuid)
+    if (user === null || !(user.permissions & 1)) {
+        return
+    }
     const nextSong = room.songs.pop()
     console.log("nextSong: " + nextSong)
     await room.save()
@@ -191,17 +294,7 @@ async function getNextSong(ws) {
     }
     ws.send(JSON.stringify(data))
 
-    const songsJson = {
-        type: "songs",
-        songs: room.songs
-    }
-
-    ws.server.clients.forEach(client => {
-        if (client.user.roomCode === ws.user.roomCode) {
-            client.send(JSON.stringify(songsJson))
-        }
-    })
-
+    await sendQueueSongs(ws, room)
 }
 
 async function handleMessagesOnWs(ws, data) {
@@ -215,7 +308,8 @@ async function handleMessagesOnWs(ws, data) {
         return null;
     }
 
-    console.log(jsonData);
+    console.log("json data join : " + JSON.stringify(jsonData));
+    // console.log(jsonData)
     switch (jsonData.type) {
         case 'join':
             await openConnectionToRoom(ws, jsonData)
@@ -226,6 +320,18 @@ async function handleMessagesOnWs(ws, data) {
             break;
         case 'get_next_song':
             await getNextSong(ws);
+            break;
+        case 'reorder_songs':
+            await changeSongOrder(ws, jsonData);
+            break;
+        case 'update_room_name':
+            await changeRoomName(ws, jsonData);
+            break;
+        case "remove_song":
+            await removeSong(ws, jsonData);
+            break;
+        case "kick_user":
+            await kickUser(ws, jsonData);
             break;
 
 
